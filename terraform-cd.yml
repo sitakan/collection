@@ -1,0 +1,138 @@
+name: Terraform CD - Snowflake Infra
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'        # Triggers CD (PRD) job for version tags
+    paths-ignore:
+      - 'terraform.tfstate*'
+      - '.terraform.lock.hcl'
+
+permissions:
+  id-token: write   # Required for OIDC
+  contents: read
+
+env:
+  CLONE_DIR: ${{ github.workspace }}
+
+jobs:
+  apply-dev:
+    if: github.ref == 'refs/heads/main'
+    name: Terraform Apply - Dev
+    runs-on: ubuntu-latest
+    container: hashicorp/terraform:1.9.5
+    environment: DEV
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Configure AWS credentials using OIDC
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::712370058468:role/Avetta-GH-OIDC-S3TerraformStateAccess
+          aws-region: us-west-2
+          role-session-name: GitHubActions-Terraform
+      
+      - name: Terraform Apply (Dev)
+        env:
+          TERRAFORM_RSA_PRIVATE_KEY: ${{ secrets.DEV_TERRAFORM_RSA_PRIVATE_KEY }}
+          TERRAFORM_RSA_KEY_PASSPHRASE: ${{ secrets.DEV_TERRAFORM_RSA_KEY_PASSPHRASE }}
+        run: |
+          set -x
+          source ./scripts/setup-terraform-rsa-keypair.sh
+          terraform init -input=false -backend-config=environments/dev-backend.tfvars -reconfigure
+          cp environments/dev-import.tf . 
+          terraform validate
+          terraform apply -auto-approve -var-file=environments/dev.tfvars -var="sf_private_key_path=$TERRAFORM_RSA_KEY_PATH" -var="sf_private_key_passphrase=$TERRAFORM_RSA_KEY_PASSPHRASE"
+
+  apply-qa:
+    if: github.ref == 'refs/heads/main'
+    name: Terraform Apply - QA
+    runs-on: ubuntu-latest
+    container: hashicorp/terraform:1.9.5
+    needs: [apply-dev]
+    environment: QA
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Configure AWS credentials using OIDC
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::712370058468:role/Avetta-GH-OIDC-S3TerraformStateAccess
+          aws-region: us-west-2
+          role-session-name: GitHubActions-Terraform
+      
+      - name: Terraform Apply (QA)
+        env:
+          TERRAFORM_RSA_PRIVATE_KEY: ${{ secrets.QA_TERRAFORM_RSA_PRIVATE_KEY }}
+          TERRAFORM_RSA_KEY_PASSPHRASE: ${{ secrets.QA_TERRAFORM_RSA_KEY_PASSPHRASE }}
+        run: |
+          set -x
+          source ./scripts/setup-terraform-rsa-keypair.sh
+          terraform init -input=false -backend-config=environments/qa-backend.tfvars -reconfigure
+          cp environments/qa-import.tf . 
+          terraform validate
+          terraform apply -auto-approve -var-file=environments/qa.tfvars -var="sf_private_key_path=$TERRAFORM_RSA_KEY_PATH" -var="sf_private_key_passphrase=$TERRAFORM_RSA_KEY_PASSPHRASE"
+
+  plan-prd:
+    if: startsWith(github.ref, 'refs/tags/v')
+    name: Terraform Plan - PRD
+    runs-on: ubuntu-latest
+    container: hashicorp/terraform:1.9.5
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Configure AWS credentials using OIDC
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::712370058468:role/Avetta-GH-OIDC-S3TerraformStateAccess
+          aws-region: us-west-2
+          role-session-name: GitHubActions-Terraform
+      
+      - name: Terraform Plan (PRD)
+        env:
+          TERRAFORM_RSA_PRIVATE_KEY: ${{ secrets.PRD_TERRAFORM_RSA_PRIVATE_KEY }}
+          TERRAFORM_RSA_KEY_PASSPHRASE: ${{ secrets.PRD_TERRAFORM_RSA_KEY_PASSPHRASE }}
+        run: |
+          set -x
+          source ./scripts/setup-terraform-rsa-keypair.sh
+          terraform init -input=false -backend-config=environments/prd-backend.tfvars -reconfigure
+          cp environments/prd-import.tf . 
+          terraform validate
+          terraform plan -var-file=environments/prd.tfvars -var="sf_private_key_path=$TERRAFORM_RSA_KEY_PATH" -var="sf_private_key_passphrase=$TERRAFORM_RSA_KEY_PASSPHRASE" -out=tfplan-prd
+      
+      - name: Upload plan file
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-prd
+          path: tfplan-prd
+
+  apply-prd:
+    if: startsWith(github.ref, 'refs/tags/v')
+    name: Terraform Apply - PRD
+    runs-on: ubuntu-latest
+    container: hashicorp/terraform:1.9.5
+    needs: [plan-prd]
+    environment: PRD
+    steps:
+      - uses: actions/checkout@v4
+      
+      # Configure AWS credentials using OIDC
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::712370058468:role/Avetta-GH-OIDC-S3TerraformStateAccess
+          aws-region: us-west-2
+          role-session-name: GitHubActions-Terraform
+      
+      - name: Terraform Apply (PRD)
+        env:
+          TERRAFORM_RSA_PRIVATE_KEY: ${{ secrets.PRD_TERRAFORM_RSA_PRIVATE_KEY }}
+          TERRAFORM_RSA_KEY_PASSPHRASE: ${{ secrets.PRD_TERRAFORM_RSA_KEY_PASSPHRASE }}
+        run: |
+          set -x
+          source ./scripts/setup-terraform-rsa-keypair.sh
+          terraform init -input=false -backend-config=environments/prd-backend.tfvars -reconfigure
+          cp environments/prd-import.tf . 
+          terraform validate
+          terraform apply -auto-approve -var-file=environments/prd.tfvars -var="sf_private_key_path=$TERRAFORM_RSA_KEY_PATH" -var="sf_private_key_passphrase=$TERRAFORM_RSA_KEY_PASSPHRASE"

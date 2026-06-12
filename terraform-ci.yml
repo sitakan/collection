@@ -1,0 +1,213 @@
+name: Terraform CI - Snowflake Infra
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  id-token: write   # Required for OIDC
+  contents: read
+
+env:
+  CLONE_DIR: ${{ github.workspace }}
+
+jobs:
+  validate-terraform:
+    name: Terraform Validate & Lint
+    runs-on: ubuntu-latest
+    container: hashicorp/terraform:1.9.5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bash and curl
+        shell: sh
+        run: |
+          set -x
+          apk add --no-cache curl bash
+
+      - name: Install tflint
+        shell: bash
+        run: |
+          set -x
+          curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+          tflint --version
+
+      - name: Terraform Format Check
+        run: |
+          set -x
+          terraform fmt -check -recursive
+
+      - name: Terraform Init (for validation)
+        run: |
+          set -x
+          terraform init -backend=false
+
+      - name: Terraform Validate
+        run: |
+          set -x
+          terraform validate
+
+      - name: TFLint
+        run: |
+          set -x
+          tflint --init
+          tflint
+
+  plan-dev:
+    name: Terraform Plan (Dev)
+    runs-on: ubuntu-latest
+    container: hashicorp/terraform:1.9.5
+    needs: [validate-terraform]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Configure AWS credentials using OIDC
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::712370058468:role/Avetta-GH-OIDC-S3TerraformStateAccess
+          aws-region: us-west-2
+          role-session-name: GitHubActions-Terraform
+
+      - name: Terraform Plan (Dev)
+        env:
+          TERRAFORM_RSA_PRIVATE_KEY: ${{ secrets.DEV_TERRAFORM_RSA_PRIVATE_KEY }}
+          TERRAFORM_RSA_KEY_PASSPHRASE: ${{ secrets.DEV_TERRAFORM_RSA_KEY_PASSPHRASE }}
+        run: |
+          set -x
+          source ./scripts/setup-terraform-rsa-keypair.sh
+          terraform init -input=false -backend-config=environments/dev-backend.tfvars -reconfigure
+          cp environments/dev-import.tf . 
+          terraform validate
+          terraform plan -out=tfplan-dev -var-file=environments/dev.tfvars -var="sf_private_key_path=$TERRAFORM_RSA_KEY_PATH" -var="sf_private_key_passphrase=$TERRAFORM_RSA_KEY_PASSPHRASE"
+          terraform show -json tfplan-dev > tfplan-dev.json
+
+      - name: Upload Terraform plan (DEV)
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-dev
+          path: |
+            tfplan-dev.json
+          if-no-files-found: ignore
+
+  plan-qa:
+    name: Terraform Plan (QA)
+    runs-on: ubuntu-latest
+    container: hashicorp/terraform:1.9.5
+    needs: [validate-terraform]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Configure AWS credentials using OIDC
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::712370058468:role/Avetta-GH-OIDC-S3TerraformStateAccess
+          aws-region: us-west-2
+          role-session-name: GitHubActions-Terraform
+
+      - name: Terraform Plan (QA)
+        env:
+          TERRAFORM_RSA_PRIVATE_KEY: ${{ secrets.QA_TERRAFORM_RSA_PRIVATE_KEY }}
+          TERRAFORM_RSA_KEY_PASSPHRASE: ${{ secrets.QA_TERRAFORM_RSA_KEY_PASSPHRASE }}
+        run: |
+          set -x
+          source ./scripts/setup-terraform-rsa-keypair.sh
+          terraform init -input=false -backend-config=environments/qa-backend.tfvars -reconfigure
+          cp environments/qa-import.tf . 
+          terraform validate
+          terraform plan -out=tfplan-qa -var-file=environments/qa.tfvars -var="sf_private_key_path=$TERRAFORM_RSA_KEY_PATH" -var="sf_private_key_passphrase=$TERRAFORM_RSA_KEY_PASSPHRASE"
+          terraform show -json tfplan-qa > tfplan-qa.json
+          
+      - name: Upload Terraform plan (QA)
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-qa
+          path: |
+            tfplan-qa.json
+          if-no-files-found: ignore
+
+  plan-prd:
+    name: Terraform Plan (PRD)
+    runs-on: ubuntu-latest
+    container: hashicorp/terraform:1.9.5
+    needs: [validate-terraform]
+    steps:
+      - uses: actions/checkout@v4
+     
+      # Configure AWS credentials using OIDC
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::712370058468:role/Avetta-GH-OIDC-S3TerraformStateAccess
+          aws-region: us-west-2
+          role-session-name: GitHubActions-Terraform
+
+      - name: Terraform Plan (PRD)
+        env:
+          TERRAFORM_RSA_PRIVATE_KEY: ${{ secrets.PRD_TERRAFORM_RSA_PRIVATE_KEY }}
+          TERRAFORM_RSA_KEY_PASSPHRASE: ${{ secrets.PRD_TERRAFORM_RSA_KEY_PASSPHRASE }}
+        run: |
+          set -x
+          source ./scripts/setup-terraform-rsa-keypair.sh
+          terraform init -input=false -backend-config=environments/prd-backend.tfvars -reconfigure
+          cp environments/prd-import.tf . 
+          terraform validate
+          terraform plan -out=tfplan-prd -var-file=environments/prd.tfvars -var="sf_private_key_path=$TERRAFORM_RSA_KEY_PATH" -var="sf_private_key_passphrase=$TERRAFORM_RSA_KEY_PASSPHRASE"
+          terraform show -json tfplan-prd > tfplan-prd.json
+
+      - name: Upload Terraform plan (PRD)
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-prd
+          path: |
+            tfplan-prd.json
+          if-no-files-found: ignore
+
+  environment-parity-check:
+    name: Environment Parity Check
+    runs-on: ubuntu-latest
+    needs: [plan-dev, plan-qa, plan-prd]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Dev Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-dev
+          path: .
+
+      - name: Download QA Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-qa
+          path: .
+
+      - name: Download PRD Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-prd
+          path: .
+
+      - name: Install conftest
+        run: |
+          set -x
+          LATEST_VERSION=$(wget -O - "https://api.github.com/repos/open-policy-agent/conftest/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | cut -c 2-)
+          ARCH=$(arch)
+          SYSTEM=$(uname)
+          wget "https://github.com/open-policy-agent/conftest/releases/download/v${LATEST_VERSION}/conftest_${LATEST_VERSION}_${SYSTEM}_${ARCH}.tar.gz"
+          tar xzf conftest_${LATEST_VERSION}_${SYSTEM}_${ARCH}.tar.gz
+          sudo mv conftest /usr/local/bin
+
+      - name: Run Environment Parity Checks
+        run: |
+          set -x
+          echo "Running parity checks between environments..."
+          
+          # Make compare script executable
+          chmod +x scripts/compare-environments.sh
+          
+          # Run pairwise comparisons
+          ./scripts/compare-environments.sh dev qa
+          ./scripts/compare-environments.sh qa prd
+          ./scripts/compare-environments.sh dev prd
+          
+          echo "All environment parity checks completed successfully!"
